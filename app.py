@@ -6,90 +6,121 @@ import time
 st.set_page_config(page_title="Universal YT Downloader", page_icon="🎬")
 st.title("🎬 Universal YT Downloader")
 
-# --- Debug: Check for Cookies ---
-if os.path.exists("cookies.txt"):
-    st.success("✅ Cookies.txt found and loaded.")
-else:
-    st.warning("⚠️ No cookies.txt found. 403 Errors are possible on Cloud.")
-
+# --- Constants ---
 DOWNLOAD_FOLDER = "downloads"
+COOKIES_FILE = "cookies.txt" 
+
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-def download_media(url, format_choice):
+# --- Debug Info ---
+if os.path.exists(COOKIES_FILE):
+    st.success("✅ Cookies loaded. Authenticated.")
+else:
+    st.warning("⚠️ No cookies.txt found. YouTube might block the download.")
+
+def download_media(url, format_mode):
     timestamp = int(time.time())
     
-    # --- CONFIGURATION TO FIX 403 & FORMAT ERRORS ---
-    ydl_opts = {
+    # Common options
+    base_opts = {
         'outtmpl': f'{DOWNLOAD_FOLDER}/%(title)s_{timestamp}.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        # Fix 1: Use iOS Client (Better for MP4s than Android)
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'web_creator'],
-            }
-        }
+        # We REMOVED the 'extractor_args' (client spoofing) because 
+        # it was causing the "Format Not Available" error on Shorts.
+        # We rely purely on cookies now.
     }
 
-    # Load Cookies
-    if os.path.exists("cookies.txt"):
-        ydl_opts['cookiefile'] = "cookies.txt"
+    if os.path.exists(COOKIES_FILE):
+        base_opts['cookiefile'] = COOKIES_FILE
 
-    # --- FORMAT LOGIC ---
-    if format_choice == "Audio (MP3)":
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
-        })
-    else:
-        # Fix 2: The "Magic" Format String for Shorts/Videos
-        # "bv*+ba/b" means: Try best video + best audio. 
-        # If that fails (Format Not Available), just give me the single best file (b).
-        ydl_opts.update({
-            'format': 'bv*+ba/b',
-            'merge_output_format': 'mp4' 
-        })
-
+    # --- ATTEMPT 1: HIGH QUALITY (HD/Merge) ---
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        st.info("Attempting High Quality Download...")
+        
+        if format_mode == "Audio":
+            # Audio is simple, usually doesn't fail
+            opts = base_opts.copy()
+            opts.update({
+                'format': 'bestaudio/best',
+                'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}],
+            })
+        else:
+            # Video: Try HD Merge first
+            opts = base_opts.copy()
+            opts.update({
+                'format': 'bestvideo+bestaudio', # Try to get 1080p+
+                'merge_output_format': 'mp4',
+            })
+
+        # Run Download
+        with yt_dlp.YoutubeDL(opts) as ydl:
             info = ydl.extract_info(url, download=True)
             fname = ydl.prepare_filename(info)
-            base, ext = os.path.splitext(fname)
-            
-            final_name = base + (".mp3" if format_choice == "Audio (MP3)" else ".mp4")
-            
-            # Post-download check: sometimes the file stays as .webm or .mkv if merge failed
-            # We look for ANY file that starts with the base name
-            if not os.path.exists(final_name):
-                 dir_files = os.listdir(DOWNLOAD_FOLDER)
-                 for f in dir_files:
-                     if base in os.path.join(DOWNLOAD_FOLDER, f) or str(timestamp) in f:
-                         final_name = os.path.join(DOWNLOAD_FOLDER, f)
-                         break
-            
-            return final_name, info.get('title', 'Media')
+            return get_final_filename(fname, format_mode, timestamp), info.get('title')
 
     except Exception as e:
+        # --- ATTEMPT 2: STANDARD QUALITY (Fallback) ---
+        # If Attempt 1 failed with "Format Not Available", we catch it here.
+        st.warning(f"HD failed ({str(e)}). Switching to Standard Mode...")
+        
+        if format_mode == "Video":
+            try:
+                opts = base_opts.copy()
+                opts.update({
+                    'format': 'best', # Just get the single best file (Safest)
+                    # Do NOT force merge_output_format here, let it be what it is
+                })
+                
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    fname = ydl.prepare_filename(info)
+                    return get_final_filename(fname, format_mode, timestamp), info.get('title')
+            except Exception as e2:
+                return None, f"All attempts failed. {str(e2)}"
+        
         return None, str(e)
+
+def get_final_filename(original_fname, mode, timestamp):
+    """Helper to find the file after FFmpeg might have renamed it"""
+    base, ext = os.path.splitext(original_fname)
+    
+    # Expected final extension
+    expected_ext = ".mp3" if mode == "Audio" else ".mp4"
+    final_name = base + expected_ext
+
+    # 1. Check if the expected file exists
+    if os.path.exists(final_name):
+        return final_name
+    
+    # 2. Check if the original file exists (e.g. if fallback downloaded .webm)
+    if os.path.exists(original_fname):
+        return original_fname
+        
+    # 3. Last resort: Look for any file with our timestamp
+    # This handles cases where yt-dlp renames things unexpectedly
+    for f in os.listdir(DOWNLOAD_FOLDER):
+        if str(timestamp) in f:
+            return os.path.join(DOWNLOAD_FOLDER, f)
+            
+    return None
 
 # --- UI ---
 url = st.text_input("Paste URL:", placeholder="https://youtube.com/...")
-fmt = st.selectbox("Format", ["Video", "Audio (MP3)"])
+fmt = st.selectbox("Format", ["Video", "Audio"])
 
 if st.button("Download"):
     if url:
         with st.spinner("Processing..."):
-            path, result = download_media(url, fmt)
+            path, title = download_media(url, fmt)
             
             if path and os.path.exists(path):
-                st.success("Done!")
+                st.success("Success!")
+                st.caption(f"File: {os.path.basename(path)}")
+                
                 with open(path, "rb") as f:
                     st.download_button("📥 Save File", f, file_name=os.path.basename(path))
             else:
-                st.error("Error:")
-                st.code(result)
+                st.error("❌ Download Failed")
+                st.write(title) # Prints error message
