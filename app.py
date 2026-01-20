@@ -3,129 +3,126 @@ import yt_dlp
 import os
 import time
 
-# --- Config ---
-st.set_page_config(page_title="Universal YT Downloader", page_icon="🎬", layout="centered")
+# --- Page Configuration ---
+st.set_page_config(page_title="Universal YT Downloader", page_icon="🎬")
+st.title("🎬 Universal YT Downloader")
+st.markdown("Supports **HD Video**, **Shorts**, and **Audio**.")
 
-# CSS to make it look like a mobile app
-st.markdown("""
-<style>
-    .stButton>button {width: 100%; border-radius: 20px; height: 3em;}
-    .stTextInput>div>div>input {border-radius: 10px;}
-</style>
-""", unsafe_allow_html=True)
-
-st.title("🎬 Universal Downloader")
-st.caption("Works on Video, Shorts & Audio")
-
-# --- Setup ---
+# --- Setup Directories ---
 DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-# --- Logic ---
-def get_cookies():
-    # Looks for cookies.txt in the same folder
-    if os.path.exists("cookies.txt"):
-        return "cookies.txt"
-    return None
-
-def download(url, type_fmt, quality):
-    timestamp = int(time.time())
-    cookies = get_cookies()
+# --- Sidebar: Cookie Uploader (CRITICAL for Cloud) ---
+with st.sidebar:
+    st.header("🔐 Authentication")
+    st.info("If you get 'Forbidden' or 'Sign In' errors, upload your cookies.txt here.")
+    uploaded_cookies = st.file_uploader("Upload cookies.txt", type=["txt"])
     
-    # Base Options
-    opts = {
+    cookie_path = None
+    if uploaded_cookies:
+        # Save cookies to a temp file
+        cookie_path = os.path.join(DOWNLOAD_FOLDER, "cookies.txt")
+        with open(cookie_path, "wb") as f:
+            f.write(uploaded_cookies.getbuffer())
+        st.success("✅ Cookies loaded")
+
+# --- Helper Function: Progress Hook ---
+def progress_hook(d):
+    if d['status'] == 'downloading':
+        try:
+            # print progress to console (optional logging)
+            pass 
+        except:
+            pass
+
+# --- Main Download Logic ---
+def download_media(url, format_choice, cookies_file=None):
+    timestamp = int(time.time())
+    
+    # 1. Base Configuration
+    ydl_opts = {
         'outtmpl': f'{DOWNLOAD_FOLDER}/%(title)s_{timestamp}.%(ext)s',
+        'progress_hooks': [progress_hook],
         'quiet': True,
         'no_warnings': True,
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/90.0.4430.212 Safari/537.36',
+        # Spoof a generic browser to avoid basic bot detection
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
-    
-    if cookies:
-        opts['cookiefile'] = cookies
 
-    # --- FORMAT LOGIC (The Fix) ---
-    if type_fmt == "Audio (MP3)":
-        opts['format'] = 'bestaudio/best'
-        opts['postprocessors'] = [{'key': 'FFmpegExtractAudio', 'preferredcodec': 'mp3', 'preferredquality': '192'}]
+    # 2. Add Cookies if provided
+    if cookies_file:
+        ydl_opts['cookiefile'] = cookies_file
+
+    # 3. Format Selection (Error-Proof Logic)
+    if format_choice == "Audio (MP3)":
+        ydl_opts.update({
+            'format': 'bestaudio/best',
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }],
+        })
     else:
-        # VIDEO LOGIC
-        if quality == "Safe Mode (No FFmpeg)":
-            # This is the "Safety" option. It downloads a single pre-merged file (usually 720p max)
-            # It NEVER requires FFmpeg and rarely fails.
-            opts['format'] = 'best'
-        else:
-            # High Definition Logic
-            # We use /best as a fallback if the merge fails
-            if quality == "1080p":
-                # We allow height up to 1920 to support HD Shorts (which are 1080x1920)
-                opts['format'] = 'bestvideo[height<=1920]+bestaudio/best[height<=1920]/best'
-            elif quality == "720p":
-                opts['format'] = 'bestvideo[height<=1280]+bestaudio/best[height<=1280]/best'
-            else:
-                # Best Available
-                opts['format'] = 'bestvideo+bestaudio/best'
-            
-            opts['merge_output_format'] = 'mp4'
+        # VIDEO MODE
+        # The magic string: "bestvideo+bestaudio/best"
+        # This tells it: "Download the best video stream AND best audio stream and merge them."
+        # " /best" means "If that fails, just download the single best file available."
+        ydl_opts.update({
+            'format': 'bestvideo+bestaudio/best', 
+            'merge_output_format': 'mp4',  # Ensures final file is MP4
+        })
 
+    # 4. Execution
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            fname = ydl.prepare_filename(info)
+            filename = ydl.prepare_filename(info)
             
-            # Handle filename extensions
-            base, ext = os.path.splitext(fname)
+            # 5. Fix Filename Extension Logic
+            # yt-dlp might return .webm, but we asked for mp3 or mp4 conversion.
+            base, ext = os.path.splitext(filename)
             
-            if type_fmt == "Audio (MP3)":
-                final = base + ".mp3"
-            elif quality == "Safe Mode (No FFmpeg)":
-                final = fname # Keep original extension (often .mp4 or .webm)
+            if format_choice == "Audio (MP3)":
+                final_filename = base + ".mp3"
             else:
-                final = base + ".mp4"
+                final_filename = base + ".mp4"
             
-            # Check if file actually exists (sometimes yt-dlp naming varies)
-            if not os.path.exists(final):
-                # Fallback: try finding the file that DOES exist with that base name
-                possible_files = [f for f in os.listdir(DOWNLOAD_FOLDER) if f.startswith(info['title'][:10])]
-                if possible_files:
-                    final = os.path.join(DOWNLOAD_FOLDER, possible_files[0])
-
-            return final, info.get('title', 'Media')
+            return final_filename, info.get('title', 'Media')
 
     except Exception as e:
         return None, str(e)
 
-# --- UI ---
-url_input = st.text_input("Paste Link:")
+# --- User Interface ---
+url = st.text_input("Paste URL:", placeholder="https://youtube.com/...")
+format_select = st.selectbox("Select Format", ["Video (Highest Quality)", "Audio (MP3)"])
 
-# Settings
-col1, col2 = st.columns(2)
-with col1:
-    fmt = st.selectbox("Format", ["Video", "Audio (MP3)"])
-with col2:
-    if fmt == "Video":
-        # Added "Safe Mode" for when HD fails
-        qual = st.selectbox("Quality", ["Best Available", "1080p", "720p", "Safe Mode (No FFmpeg)"])
+if st.button("Download", type="primary"):
+    if not url:
+        st.warning("Please enter a URL first.")
     else:
-        st.write("🎵 MP3")
-
-if st.button("🚀 Download"):
-    if not url_input:
-        st.warning("Please paste a link.")
-    else:
-        with st.spinner("Processing..."):
-            path, result = download(url_input, fmt, qual if fmt == "Video" else None)
+        with st.spinner("Processing... (This may take a moment for HD)"):
+            # Pass the cookie path (if uploaded) to the downloader
+            path, result = download_media(url, format_select, cookie_path)
             
             if path and os.path.exists(path):
-                st.success("Success!")
+                st.success("Download Complete!")
+                
+                # Create the download button
                 with open(path, "rb") as f:
+                    file_name = os.path.basename(path)
+                    mime_type = "audio/mpeg" if format_select == "Audio (MP3)" else "video/mp4"
+                    
                     st.download_button(
-                        "📥 Save File", 
-                        f, 
-                        file_name=os.path.basename(path),
-                        mime="video/mp4" if fmt == "Video" else "audio/mpeg"
+                        label="📥 Click to Save File",
+                        data=f,
+                        file_name=file_name,
+                        mime=mime_type
                     )
             else:
-                st.error("Error detected.")
-                st.code(result)
-                st.info("💡 Try switching Quality to **'Safe Mode (No FFmpeg)'** if this keeps happening.")
+                st.error("❌ An error occurred.")
+                st.code(result) # Show the exact error message
+                
+                if result and ("403" in result or "Sign in" in result):
+                    st.warning("⚠️ **Fix:** This is a YouTube restriction. Please upload your `cookies.txt` in the sidebar.")
