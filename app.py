@@ -3,136 +3,130 @@ import yt_dlp
 import os
 import time
 
-# Create a 'downloads' directory to store temporary files
+# Create directories
 DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-st.set_page_config(page_title="Advanced YT Downloader", page_icon="🎬")
+# Cookie storage
+COOKIE_FILE = "cookies.txt"
 
-st.title("🎬 Advanced YouTube Downloader")
-st.markdown("Download **HD Videos (MP4)** or extract **Audio (MP3)** seamlessly.")
+st.set_page_config(page_title="Pro YT Downloader", page_icon="🎬", layout="centered")
 
-# --- Session State for UI stability ---
-if "url" not in st.session_state:
-    st.session_state.url = ""
+st.title("🎬 Pro YouTube Downloader")
+st.markdown("Download **HD Video**, **Shorts**, or **Audio**. If downloads fail, upload your cookies in the sidebar.")
 
-# --- Input Section ---
-url = st.text_input("Paste YouTube URL here:", placeholder="https://www.youtube.com/watch?v=...")
+# --- Sidebar: Authentication (The Fix for 403/Forbidden) ---
+with st.sidebar:
+    st.header("⚙️ Advanced Settings")
+    st.info("💡 Getting 'Forbidden' or '404' errors? Upload your cookies.txt file here.")
+    
+    uploaded_cookies = st.file_uploader("Upload cookies.txt", type=["txt"])
+    
+    cookie_path = None
+    if uploaded_cookies is not None:
+        # Save the uploaded cookie file temporarily
+        with open(COOKIE_FILE, "wb") as f:
+            f.write(uploaded_cookies.getbuffer())
+        cookie_path = COOKIE_FILE
+        st.success("✅ Cookies loaded! Retrying download should work now.")
+    else:
+        st.warning("⚠️ No cookies loaded. Cloud servers may get blocked by YouTube.")
 
-# Options
+# --- Main Interface ---
+url = st.text_input("Paste URL (Video or Short):", placeholder="https://www.youtube.com/watch?v=...")
+
 col1, col2 = st.columns(2)
 with col1:
-    download_type = st.selectbox("Select Format", ["Video (MP4)", "Audio (MP3)"])
+    download_type = st.selectbox("Format", ["Video (MP4)", "Audio (MP3)"])
 with col2:
     if download_type == "Video (MP4)":
-        quality = st.selectbox("Max Resolution", ["Best Available (4K/8K)", "1080p", "720p", "480p"])
+        quality = st.selectbox("Quality", ["Best Available", "1080p", "720p"])
     else:
-        st.info("Audio will be converted to high-quality MP3 (192kbps).")
+        st.info("High Quality MP3 (192kbps)")
 
-# Progress Bar & Status Text container
+# --- Core Logic ---
 progress_bar = st.progress(0)
 status_text = st.empty()
 
-# --- Helper Functions ---
-
 def progress_hook(d):
-    """
-    Callback function to update the progress bar.
-    yt-dlp calls this periodically during download.
-    """
     if d['status'] == 'downloading':
         try:
             p = d.get('_percent_str', '0%').replace('%', '')
             progress = float(p) / 100
             progress_bar.progress(progress)
-            status_text.text(f"Downloading: {d.get('_percent_str')} | Speed: {d.get('_speed_str')} | ETA: {d.get('_eta_str')}")
+            status_text.text(f"⏳ {d.get('_percent_str')} | {d.get('_speed_str')}")
         except:
             pass
     elif d['status'] == 'finished':
         progress_bar.progress(1.0)
-        status_text.success("Download Complete! Processing file...")
+        status_text.success("✅ Download complete! Processing...")
 
-def download_video(url, download_type, quality=None):
+def download_video(url, type, quality, cookies=None):
     timestamp = int(time.time())
     
-    # Base options
+    # Advanced Options to Bypass Blocks
     ydl_opts = {
         'outtmpl': f'{DOWNLOAD_FOLDER}/%(title)s_{timestamp}.%(ext)s',
         'progress_hooks': [progress_hook],
         'quiet': True,
         'no_warnings': True,
+        # Spoof a real browser user agent
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
 
-    # Format selection logic
-    if download_type == "Audio (MP3)":
+    # Attach cookies if uploaded
+    if cookies:
+        ydl_opts['cookiefile'] = cookies
+
+    if type == "Audio (MP3)":
         ydl_opts.update({
             'format': 'bestaudio/best',
-            'postprocessors': [{
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            }],
+            'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}],
         })
-    else: # Video
-        if quality == "Best Available (4K/8K)":
-            # "bestvideo+bestaudio" ensures we get separate high-quality streams and merge them
-            format_str = 'bestvideo+bestaudio/best'
-        elif quality == "1080p":
+    else:
+        if quality == "1080p":
             format_str = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
         elif quality == "720p":
             format_str = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
-        else: # 480p
-            format_str = 'bestvideo[height<=480]+bestaudio/best[height<=480]'
+        else:
+            format_str = 'bestvideo+bestaudio/best'
         
-        ydl_opts.update({
-            'format': format_str,
-            'merge_output_format': 'mp4', # Forces output to be mp4 even if streams are webm
-        })
+        ydl_opts.update({'format': format_str, 'merge_output_format': 'mp4'})
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            
-            # Retrieve the filename
-            # Note: prepare_filename doesn't always account for post-processing changes (like mp4 -> mp3)
-            # So we check the directory for the file with the timestamp we added.
             filename = ydl.prepare_filename(info)
             
-            if download_type == "Audio (MP3)":
-                # prepare_filename returns .webm or .m4a, but we converted to .mp3
-                base, _ = os.path.splitext(filename)
-                final_filename = base + ".mp3"
-            else:
-                # prepare_filename might return .mkv or .webm, but we forced merge to mp4
-                base, _ = os.path.splitext(filename)
-                final_filename = base + ".mp4"
+            # Handle extension changes (webm -> mp3/mp4)
+            base, _ = os.path.splitext(filename)
+            final_ext = ".mp3" if type == "Audio (MP3)" else ".mp4"
+            final_filename = base + final_ext
             
-            return final_filename, info.get('title', 'video')
+            return final_filename, info.get('title', 'media')
 
     except Exception as e:
-        st.error(f"Error: {str(e)}")
-        return None, None
+        # Return the error to display to the user
+        return None, str(e)
 
-# --- Main Execution ---
-if st.button("Start Download"):
+if st.button("🚀 Download"):
     if url:
-        with st.spinner("Fetching video info..."):
-            file_path, title = download_video(url, download_type, quality if download_type == "Video (MP4)" else None)
+        with st.spinner("Connecting to YouTube..."):
+            # Check if cookies exist locally
+            current_cookie = COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
+            
+            file_path, result = download_video(url, download_type, quality if download_type == "Video (MP4)" else None, current_cookie)
 
         if file_path and os.path.exists(file_path):
-            # Display success and download button
-            st.success(f"Processed: {title}")
-            
-            with open(file_path, "rb") as file:
-                btn = st.download_button(
-                    label="📥 Save to Computer",
-                    data=file,
-                    file_name=os.path.basename(file_path),
-                    mime="audio/mpeg" if download_type == "Audio (MP3)" else "video/mp4"
-                )
-            
-            # Optional: Clean up file after user has had a chance to download (Manual cleanup is safer in Streamlit)
-            # os.remove(file_path) 
+            st.balloons()
+            st.success(f"Ready: {result}")
+            with open(file_path, "rb") as f:
+                st.download_button("📥 Save File", f, file_name=os.path.basename(file_path))
+        else:
+            st.error("❌ Download Failed")
+            st.error(f"Error Details: {result}")
+            if "HTTP Error 403" in str(result) or "Sign in" in str(result):
+                st.warning("👉 **Fix:** Please upload your `cookies.txt` in the sidebar to bypass this YouTube restriction.")
     else:
-        st.warning("Please enter a valid URL.")
+        st.warning("Please paste a link first.")
