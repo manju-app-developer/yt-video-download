@@ -2,131 +2,112 @@ import streamlit as st
 import yt_dlp
 import os
 import time
+import shutil
 
-# Create directories
+# --- Config & Mobile Layout ---
+st.set_page_config(page_title="YT Downloader", page_icon="⬇️", layout="centered")
+
+# CSS to hide default Streamlit branding for a cleaner "App" feel
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
+# --- Setup Directories ---
 DOWNLOAD_FOLDER = "downloads"
 if not os.path.exists(DOWNLOAD_FOLDER):
     os.makedirs(DOWNLOAD_FOLDER)
 
-# Cookie storage
-COOKIE_FILE = "cookies.txt"
+st.title("⬇️ Mobile YT Downloader")
 
-st.set_page_config(page_title="Pro YT Downloader", page_icon="🎬", layout="centered")
+# --- input ---
+url = st.text_input("", placeholder="Paste Link (Video/Shorts)")
 
-st.title("🎬 Pro YouTube Downloader")
-st.markdown("Download **HD Video**, **Shorts**, or **Audio**. If downloads fail, upload your cookies in the sidebar.")
-
-# --- Sidebar: Authentication (The Fix for 403/Forbidden) ---
-with st.sidebar:
-    st.header("⚙️ Advanced Settings")
-    st.info("💡 Getting 'Forbidden' or '404' errors? Upload your cookies.txt file here.")
-    
-    uploaded_cookies = st.file_uploader("Upload cookies.txt", type=["txt"])
-    
-    cookie_path = None
-    if uploaded_cookies is not None:
-        # Save the uploaded cookie file temporarily
-        with open(COOKIE_FILE, "wb") as f:
-            f.write(uploaded_cookies.getbuffer())
-        cookie_path = COOKIE_FILE
-        st.success("✅ Cookies loaded! Retrying download should work now.")
-    else:
-        st.warning("⚠️ No cookies loaded. Cloud servers may get blocked by YouTube.")
-
-# --- Main Interface ---
-url = st.text_input("Paste URL (Video or Short):", placeholder="https://www.youtube.com/watch?v=...")
-
+# --- Mobile Friendly Controls ---
+# We use columns to put buttons side-by-side on mobile
 col1, col2 = st.columns(2)
 with col1:
-    download_type = st.selectbox("Format", ["Video (MP4)", "Audio (MP3)"])
+    fmt = st.radio("Format", ["Video (MP4)", "Audio (MP3)"], label_visibility="collapsed")
 with col2:
-    if download_type == "Video (MP4)":
-        quality = st.selectbox("Quality", ["Best Available", "1080p", "720p"])
+    if fmt == "Video (MP4)":
+        qual = st.selectbox("Quality", ["Best", "1080p", "720p"], label_visibility="collapsed")
     else:
-        st.info("High Quality MP3 (192kbps)")
+        st.write("🎵 MP3 Audio")
 
-# --- Core Logic ---
-progress_bar = st.progress(0)
-status_text = st.empty()
+# --- Logic ---
+def get_cookies_path():
+    # 1. Look for pre-loaded cookies (Best for Mobile Users)
+    if os.path.exists("cookies.txt"):
+        return "cookies.txt"
+    # 2. Look for secrets (Advanced Streamlit Cloud method)
+    #    You can store cookies content in st.secrets and write to file here
+    return None
 
-def progress_hook(d):
-    if d['status'] == 'downloading':
-        try:
-            p = d.get('_percent_str', '0%').replace('%', '')
-            progress = float(p) / 100
-            progress_bar.progress(progress)
-            status_text.text(f"⏳ {d.get('_percent_str')} | {d.get('_speed_str')}")
-        except:
-            pass
-    elif d['status'] == 'finished':
-        progress_bar.progress(1.0)
-        status_text.success("✅ Download complete! Processing...")
-
-def download_video(url, type, quality, cookies=None):
+def download(link, format_type, quality_setting):
     timestamp = int(time.time())
+    cookies = get_cookies_path()
     
-    # Advanced Options to Bypass Blocks
-    ydl_opts = {
+    opts = {
         'outtmpl': f'{DOWNLOAD_FOLDER}/%(title)s_{timestamp}.%(ext)s',
-        'progress_hooks': [progress_hook],
         'quiet': True,
         'no_warnings': True,
-        # Spoof a real browser user agent
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        # Mobile User Agent to blend in
+        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1',
     }
 
-    # Attach cookies if uploaded
     if cookies:
-        ydl_opts['cookiefile'] = cookies
+        opts['cookiefile'] = cookies
 
-    if type == "Audio (MP3)":
-        ydl_opts.update({
-            'format': 'bestaudio/best',
-            'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}],
-        })
+    if format_type == "Audio (MP3)":
+        opts['format'] = 'bestaudio/best'
+        opts['postprocessors'] = [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3'}]
     else:
-        if quality == "1080p":
-            format_str = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
-        elif quality == "720p":
-            format_str = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+        # Simplified quality logic for mobile stability
+        if quality_setting == "1080p":
+            opts['format'] = 'bestvideo[height<=1080]+bestaudio/best'
+        elif quality_setting == "720p":
+            opts['format'] = 'bestvideo[height<=720]+bestaudio/best'
         else:
-            format_str = 'bestvideo+bestaudio/best'
-        
-        ydl_opts.update({'format': format_str, 'merge_output_format': 'mp4'})
+            opts['format'] = 'bestvideo+bestaudio/best'
+        opts['merge_output_format'] = 'mp4'
 
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            # Handle extension changes (webm -> mp3/mp4)
-            base, _ = os.path.splitext(filename)
-            final_ext = ".mp3" if type == "Audio (MP3)" else ".mp4"
-            final_filename = base + final_ext
-            
-            return final_filename, info.get('title', 'media')
-
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(link, download=True)
+            fname = ydl.prepare_filename(info)
+            base, _ = os.path.splitext(fname)
+            final = base + (".mp3" if format_type == "Audio (MP3)" else ".mp4")
+            return final, info.get('title', 'Media')
     except Exception as e:
-        # Return the error to display to the user
         return None, str(e)
 
-if st.button("🚀 Download"):
-    if url:
-        with st.spinner("Connecting to YouTube..."):
-            # Check if cookies exist locally
-            current_cookie = COOKIE_FILE if os.path.exists(COOKIE_FILE) else None
-            
-            file_path, result = download_video(url, download_type, quality if download_type == "Video (MP4)" else None, current_cookie)
-
-        if file_path and os.path.exists(file_path):
-            st.balloons()
-            st.success(f"Ready: {result}")
-            with open(file_path, "rb") as f:
-                st.download_button("📥 Save File", f, file_name=os.path.basename(file_path))
-        else:
-            st.error("❌ Download Failed")
-            st.error(f"Error Details: {result}")
-            if "HTTP Error 403" in str(result) or "Sign in" in str(result):
-                st.warning("👉 **Fix:** Please upload your `cookies.txt` in the sidebar to bypass this YouTube restriction.")
+# --- Button ---
+# "use_container_width=True" makes the button full width on mobile
+if st.button("Download Now", use_container_width=True):
+    if not url:
+        st.toast("⚠️ Paste a link first!")
     else:
-        st.warning("Please paste a link first.")
+        with st.status("Downloading...", expanded=True) as status:
+            st.write("☁️ Connecting to server...")
+            path, result = download(url, fmt, qual if fmt == "Video (MP4)" else None)
+            
+            if path and os.path.exists(path):
+                status.update(label="✅ Ready!", state="complete", expanded=False)
+                
+                with open(path, "rb") as f:
+                    st.download_button(
+                        label="💾 Save to Device",
+                        data=f,
+                        file_name=os.path.basename(path),
+                        mime="audio/mpeg" if fmt == "Audio (MP3)" else "video/mp4",
+                        use_container_width=True
+                    )
+            else:
+                status.update(label="❌ Failed", state="error")
+                st.error(f"Error: {result}")
+                if "403" in str(result) or "Sign in" in str(result):
+                    st.error("Server cookies expired. Please update 'cookies.txt' in the repo.")
